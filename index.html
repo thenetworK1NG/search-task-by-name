@@ -2,7 +2,15 @@
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>Kanboard searchTasks Example</title>    <style>
+    <title>Kanboard searchTasks Example</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#3498db">
+    <link rel="manifest" href="manifest.json">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <meta name="apple-mobile-web-app-title" content="Progress App">
+    <link rel="apple-touch-icon" href="NEW.png">
+    <style>
         body { 
             font-family: 'Segoe UI', Arial, sans-serif; 
             margin: 0;
@@ -28,6 +36,12 @@
             gap: 15px;
             margin-bottom: 30px;
             align-items: flex-end;
+        }
+        .actions-row {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-top: 10px;
         }
         .form-group {
             flex: 1;
@@ -63,6 +77,16 @@
         }
         button:hover {
             background: #2980b9;
+        }
+        button.secondary {
+            background: #6c757d;
+        }
+        button.secondary:hover {
+            background: #5a6268;
+        }
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
         }
         pre { 
             background: #f8f9fa; 
@@ -173,10 +197,39 @@
             </div>
             <button id="searchBtn">Search Tasks</button>
         </div>
+        <div class="actions-row">
+            <button id="exportPdfBtn" class="secondary" disabled>Export PDF</button>
+        </div>
     
     <div id="result"></div>
 
+    <!-- jsPDF (UMD) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" integrity="sha512-/F2x4W2KIiMzFxLpy0X58F3RDeo63eNbUsVTNff7kwh28ykVfoCENKz7LxyzKDn5XxhxL7sRKqzZo4PMmD/2g==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
     <script>
+        // Register Service Worker
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./sw.js')
+                    .then(registration => {
+                        console.log('ServiceWorker registration successful');
+                    })
+                    .catch(err => {
+                        console.log('ServiceWorker registration failed: ', err);
+                    });
+            });
+        }
+
+        // Add to homescreen prompt
+        let deferredPrompt;
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredPrompt = e;
+            // Show install button or notification here if needed
+        });
+
+        // Cache management for offline data
+        let cachedTasks = [];
+        
         // Workflow steps configuration
         const steps = [
             { id: '3', label: 'DESIGN', img: 'DESIGN.png' },
@@ -217,7 +270,7 @@
         async function performSearch() {
             const projectId = parseInt(document.getElementById("projectId").value, 10);
             const userQuery = document.getElementById("query").value;
-            const query = `status:open ${userQuery}`.trim();
+            const query = userQuery ? `status:open ${userQuery}` : 'status:open';
 
             const payload = {
                 jsonrpc: "2.0",
@@ -242,15 +295,59 @@
                 if (!response.ok) throw new Error("HTTP error " + response.status);
                 
                 const data = await response.json();
+                cachedTasks = data.result; // Cache the results
                 displayResult(data.result);
+                
+                // Store in localStorage for offline access
+                localStorage.setItem('cachedTasks', JSON.stringify({
+                    timestamp: Date.now(),
+                    tasks: data.result
+                }));
 
             } catch (err) {
-                document.getElementById("result").innerHTML = `<pre>Error: ${err}</pre>`;
+                console.log('Error fetching data:', err);
+                
+                // Try to load cached data if offline
+                const cachedData = localStorage.getItem('cachedTasks');
+                if (cachedData) {
+                    const { tasks, timestamp } = JSON.parse(cachedData);
+                    const cacheAge = Date.now() - timestamp;
+                    
+                    // Show offline notification
+                    showOfflineNotification(cacheAge);
+                    
+                    displayResult(tasks);
+                } else {
+                    document.getElementById("result").innerHTML = `
+                        <div style="text-align: center; color: #666; padding: 40px;">
+                            <p>Unable to load tasks. You are offline and no cached data is available.</p>
+                        </div>`;
+                }
             }
         }
 
-        // Add event listener for the search button
-        document.getElementById("searchBtn").addEventListener("click", performSearch);
+        function showOfflineNotification(cacheAge) {
+            const minutes = Math.floor(cacheAge / 60000);
+            const notification = document.createElement('div');
+            notification.style.cssText = `
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                background: #f39c12;
+                color: white;
+                padding: 12px 20px;
+                border-radius: 4px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+                z-index: 1000;
+            `;
+            notification.textContent = `You're offline. Showing cached data from ${minutes} minutes ago.`;
+            document.body.appendChild(notification);
+            setTimeout(() => notification.remove(), 5000);
+        }
+
+    // Add event listener for the search button
+    document.getElementById("searchBtn").addEventListener("click", performSearch);
+    document.getElementById("exportPdfBtn").addEventListener("click", exportTasksToPDF);
 
         // Add event listener for Enter key on the query input
         document.getElementById("query").addEventListener("keypress", function(event) {
@@ -260,7 +357,7 @@
             }
         });
 
-        function displayResult(tasks) {
+    function displayResult(tasks) {
             if (!tasks || tasks.length === 0) {
                 document.getElementById("result").innerHTML = `
                     <div style="text-align: center; color: #666; padding: 40px;">
@@ -269,6 +366,7 @@
                         </svg>
                         <p>No tasks found</p>
                     </div>`;
+        document.getElementById('exportPdfBtn').disabled = true;
                 return;
             }
 
@@ -301,6 +399,111 @@
             html += "</table>";
 
             document.getElementById("result").innerHTML = html;
+            document.getElementById('exportPdfBtn').disabled = false;
+        }
+
+        // Export tasks to PDF (ID, Title, Status)
+        function exportTasksToPDF() {
+            if (!cachedTasks || cachedTasks.length === 0) return;
+
+            // Filter out tasks with column_id 1 or 2
+            const tasksToExport = cachedTasks.filter(t => !['1','2',1,2].includes(t.column_id));
+            if (tasksToExport.length === 0) {
+                alert('No eligible tasks to export (columns 1 and 2 excluded).');
+                return;
+            }
+            const ensureJsPDF = () => new Promise((resolve, reject) => {
+                if (window.jspdf && window.jspdf.jsPDF) return resolve(window.jspdf.jsPDF);
+                const script = document.createElement('script');
+                script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+                script.onload = () => {
+                    if (window.jspdf && window.jspdf.jsPDF) resolve(window.jspdf.jsPDF); else reject(new Error('jsPDF not available after load'));
+                };
+                script.onerror = () => reject(new Error('Failed to load jsPDF'));
+                document.head.appendChild(script);
+            });
+
+            ensureJsPDF().then(jsPDFConstructor => {
+                generatePDF(jsPDFConstructor, tasksToExport);
+            }).catch(err => {
+                console.error('PDF generation failed:', err);
+                // Provide a CSV download as last resort
+                const rows = [['Title','Status'], ...tasksToExport.map(t => {
+                    const step = steps.find(s => s.id === t.column_id.toString());
+                    const status = step ? step.label : t.column_id;
+                    return [t.title || '', status];
+                })];
+                const csv = rows.map(r => r.map(v => '"'+String(v).replace(/"/g,'""')+'"').join(',')).join('\n');
+                const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = 'tasks_export.csv';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+            });
+        }
+
+        function generatePDF(jsPDFConstructor, tasksToExport) {
+            const doc = new jsPDFConstructor({ orientation: 'portrait', unit: 'pt', format: 'a4' });
+            const left = 40;
+            const top = 50;
+            const lineHeight = 18;
+            const pageHeight = doc.internal.pageSize.getHeight();
+            const usableHeight = pageHeight - top - 40;
+            let y = top;
+            const now = new Date();
+
+            // Header
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(16);
+            doc.text('Task List', left, y);
+            doc.setFontSize(10);
+            doc.setFont('helvetica', 'normal');
+            doc.text(now.toLocaleString(), left + 250, y, { align: 'left' });
+            y += 30;
+
+            // Table header (Title, Status only)
+            doc.setFontSize(11);
+            doc.setFont('helvetica', 'bold');
+            doc.text('Title', left, y);
+            doc.text('Status', left + 380, y);
+            y += lineHeight;
+            doc.setFont('helvetica', 'normal');
+
+            // Draw line
+            doc.setLineWidth(0.5);
+            doc.line(left, y - lineHeight + 4, left + 520, y - lineHeight + 4);
+
+            tasksToExport.forEach(task => {
+                const step = steps.find(s => s.id === task.column_id.toString());
+                const status = step ? step.label : task.column_id;
+                const rawTitle = (task.title || '').toUpperCase();
+                const titleLines = doc.splitTextToSize(rawTitle, 340);
+                const rowHeight = Math.max(titleLines.length * lineHeight, lineHeight);
+
+                if (y + rowHeight > top + usableHeight) {
+                    doc.addPage();
+                    y = top;
+                    doc.setFont('helvetica', 'bold');
+                    doc.text('Title', left, y);
+                    doc.text('Status', left + 380, y);
+                    y += lineHeight;
+                    doc.setFont('helvetica', 'normal');
+                    doc.line(left, y - lineHeight + 4, left + 520, y - lineHeight + 4);
+                }
+
+                doc.text(titleLines, left, y);
+                doc.text(String(status), left + 380, y);
+                y += rowHeight;
+            });
+
+            const fileName = `tasks_no1and2_${now.toISOString().replace(/[:T]/g,'-').split('.')[0]}.pdf`;
+            doc.save(fileName); // triggers browser download
+        }
+
+        function escapeHtml(str) {
+            return str.replace(/[&<>"]+/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
         }
     </script>
 </body>
